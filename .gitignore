@@ -9,3 +9,10 @@ files
 mnt
 rootfs
 apk.static
+
+# Prebuilt device firmware/binaries are committed intentionally so the build
+# stays self-contained. Re-include them despite the *.bin/*.mbn/*.fw rules above.
+!prebuilt/
+!prebuilt/**/*.bin
+!prebuilt/**/*.mbn
+!prebuilt/**/*.fw

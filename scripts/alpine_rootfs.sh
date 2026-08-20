@@ -1,12 +1,16 @@
 #!/bin/sh -e
 
 export CHROOT=${CHROOT=$(pwd)/rootfs}
-export HOST_NAME=${HOST_NAME=openstick-alpine}
+export HOST_NAME=${HOST_NAME=alpine}
 export RELEASE=${RELEASE=v3.24}
 export PMOS_RELEASE=${PMOS_RELEASE=v25.12}
 export MIRROR=${MIRROR=http://dl-cdn.alpinelinux.org/alpine}
 export PMOS_MIRROR=${PMOS_MIRROR=http://mirror.postmarketos.org/postmarketos}
 export APK_STATIC_URL=https://gitlab.alpinelinux.org/api/v4/projects/5/packages/generic/v3.0.6/x86_64/apk.static
+# Pre-extracted kernel modules + firmware + low-level firmware from the device flash package
+export PREBUILT=${PREBUILT=prebuilt/ufi103s}
+
+[ -d "${PREBUILT}/lib/modules" ] || { echo "ERROR: ${PREBUILT}/lib/modules missing; run scripts/extract_prebuilt.sh first"; exit 1; }
 
 rm -rf ${CHROOT}
 
@@ -27,18 +31,20 @@ cp $(which qemu-aarch64-static) ${CHROOT}/usr/bin
 ./apk.static add -p ${CHROOT} --initdb -U --arch aarch64 --allow-untrusted alpine-base
 
 # install apps
+# NOTE: we deliberately do NOT install linux-postmarketos-qcom-msm8916 here.
+# The kernel comes from the device's stock boot.img (kept untouched); we only
+# copy that kernel's matching /lib/modules and /lib/firmware from PREBUILT.
+# ModemManager is omitted (no SIM card). dropbear is replaced by openssh-server
+# so we can honor "PermitRootLogin yes" + pre-generated host keys.
 chroot ${CHROOT} ash -l -c "
 apk add --allow-untrusted postmarketos-keys@pmos
 apk add \
     bridge-utils \
     chrony \
-    dropbear \
     dbus \
     eudev \
     gadget-tool \
     iptables \
-    linux-postmarketos-qcom-msm8916@pmos \
-    modemmanager \
     msm-firmware-loader@pmos \
     openrc \
     rmtfs \
@@ -49,17 +55,28 @@ apk add \
     wireguard-tools \
     wireguard-tools-wg-quick \
     wireless-regdb \
-    iw
+    iw \
+    wpa_supplicant \
+    e2fsprogs-extra \
+    openssh-server
 
 # clear
 rm /etc/fstab
 "
+
+# copy kernel modules and firmware extracted from the device flash package.
+# The module directory name under PREBUILT/lib/modules is the exact kernel
+# version string and is preserved as-is (requirement #4).
+mkdir -p ${CHROOT}/lib/modules ${CHROOT}/lib/firmware
+cp -a ${PREBUILT}/lib/modules/. ${CHROOT}/lib/modules/
+cp -a ${PREBUILT}/lib/firmware/. ${CHROOT}/lib/firmware/
 
 # extract NetworkManager from previous alpine version (v3.20)
 scripts/extract_networkmanager.sh
 
 # setup alpine
 chroot ${CHROOT} ash -l -c "
+echo root:alpine | chpasswd
 echo user:1::::/home/user:/bin/ash | newusers
 
 # update users used by chrooted apps
@@ -92,14 +109,48 @@ rc-update add bootmisc boot
 rc-update add mount-ro shutdown
 rc-update add killprocs shutdown
 rc-update add savecache shutdown
-rc-update add dropbear default
+rc-update add sshd default
 rc-update add rmtfs default
-rc-update add modemmanager default
 rc-update add networkmanager default
 rc-update add networkmanager-dispatcher default
 rc-update add wpa_supplicant default
+rc-update add local default
 "
 echo 'user ALL=(ALL:ALL) NOPASSWD: ALL' > ${CHROOT}/etc/sudoers.d/user
+
+# SSH: allow root login and pre-generate host keys at build time
+if grep -q '^#\?PermitRootLogin' ${CHROOT}/etc/ssh/sshd_config; then
+    sed -i 's/^#\?PermitRootLogin.*/PermitRootLogin yes/' ${CHROOT}/etc/ssh/sshd_config
+else
+    echo 'PermitRootLogin yes' >> ${CHROOT}/etc/ssh/sshd_config
+fi
+chroot ${CHROOT} ash -l -c "ssh-keygen -A"
+
+# WiFi firmware module autoload
+echo 'qcom_wcnss_pil' > ${CHROOT}/etc/modules-load.d/wcnss.conf
+echo 'qcom_wcnss_pil' >> ${CHROOT}/etc/modules
+
+# CPU frequency: ondemand governor
+echo 'cpufreq_ondemand' > ${CHROOT}/etc/modules-load.d/cpufreq.conf
+echo 'cpufreq_ondemand' >> ${CHROOT}/etc/modules
+cat << 'EOF' > ${CHROOT}/etc/local.d/cpufreq.start
+#!/bin/sh
+echo ondemand > /sys/devices/system/cpu/cpufreq/policy0/scaling_governor
+echo 75 > /sys/devices/system/cpu/cpufreq/ondemand/up_threshold
+echo 20000 > /sys/devices/system/cpu/cpufreq/ondemand/sampling_rate
+echo 4 > /sys/devices/system/cpu/cpufreq/ondemand/sampling_down_factor
+EOF
+chmod +x ${CHROOT}/etc/local.d/cpufreq.start
+
+# First-boot rootfs resize (uses the actual root device from /proc/mounts)
+cat << 'EOF' > ${CHROOT}/etc/local.d/resize-rootfs.start
+#!/bin/sh
+ROOT_DEV=$(awk '$2 == "/" {print $1}' /proc/mounts)
+if [ -n "${ROOT_DEV}" ]; then
+    resize2fs "${ROOT_DEV}"
+fi
+EOF
+chmod +x ${CHROOT}/etc/local.d/resize-rootfs.start
 
 # add udev rules
 cat << EOF > ${CHROOT}/etc/udev/rules.d/10-udc.rules
@@ -117,8 +168,10 @@ echo 'ttyMSM0::respawn:/bin/sh' >> ${CHROOT}/etc/inittab
 echo ${HOST_NAME} > ${CHROOT}/etc/hostname
 sed -i "/localhost/ s/$/ ${HOST_NAME}/" ${CHROOT}/etc/hosts
 
-# setup NetworkManager
-cp configs/*.nmconnection ${CHROOT}/usr/local/etc/NetworkManager/system-connections
+# setup NetworkManager (hotspot + usb only; no modem/wwan connection)
+mkdir -p ${CHROOT}/usr/local/etc/NetworkManager/system-connections
+cp configs/hotspot.nmconnection ${CHROOT}/usr/local/etc/NetworkManager/system-connections
+cp configs/usb.nmconnection ${CHROOT}/usr/local/etc/NetworkManager/system-connections
 chmod 0600 ${CHROOT}/usr/local/etc/NetworkManager/system-connections/*
 ln -s ../usr/local/etc/NetworkManager ${CHROOT}/etc/NetworkManager
 

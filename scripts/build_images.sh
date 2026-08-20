@@ -2,25 +2,16 @@
 
 CHROOT=${CHROOT=$(pwd)/rootfs}
 
-#package rootfs
-rm -f rootfs.raw boot.raw
+# package rootfs
+rm -f rootfs.raw
 mkdir -p files mnt
 
-# create boot
-truncate -s 67108864 boot.raw
-mkfs.ext2 boot.raw
-mount boot.raw mnt
-tar xf alpine_rootfs.tgz -C mnt ./boot --exclude='./boot/linux.efi' --strip-components=2
-umount mnt
-
-# create root img
-truncate -s 1610612736 rootfs.raw
-mkfs.ext4 rootfs.raw
+# create root img (512MB ext4, partition label "rootfs")
+truncate -s 536870912 rootfs.raw
+mkfs.ext4 -F -L rootfs rootfs.raw
 mount rootfs.raw mnt
 tar xpf alpine_rootfs.tgz -C mnt --exclude='./boot/*' --exclude='./root/*' --exclude='./dev/*'
-
 umount mnt
 
-# create sparse android images 
+# create sparse android image for fastboot
 img2simg rootfs.raw files/alpine_rootfs.bin
-img2simg boot.raw files/boot.bin
