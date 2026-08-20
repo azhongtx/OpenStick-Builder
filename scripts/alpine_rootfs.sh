@@ -179,6 +179,7 @@ mkdir -p ${CHROOT}/boot/extlinux
 cp configs/extlinux.conf ${CHROOT}/boot/extlinux
 
 # copy custom dtb's
+mkdir -p ${CHROOT}/boot/dtbs/qcom
 cp dtbs/* ${CHROOT}/boot/dtbs/qcom
 
 # update fstab

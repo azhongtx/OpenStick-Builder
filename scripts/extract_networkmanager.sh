@@ -29,8 +29,11 @@ cp ${BASE}/usr/share/dbus-1/system-services/*wp* ${CHROOT}/usr/share/dbus-1/syst
 cp ${BASE}/usr/share/dbus-1/system.d/nm*	 ${CHROOT}/usr/share/dbus-1/system.d
 cp ${BASE}/usr/share/dbus-1/system.d/*Net*	 ${CHROOT}/usr/share/dbus-1/system.d
 cp ${BASE}/usr/share/dbus-1/system.d/wpa*	 ${CHROOT}/usr/share/dbus-1/system.d
-cp ${BASE}/usr/share/polkit-1/actions/*Net*	 ${CHROOT}/usr/share/polkit-1/actions
-cp ${BASE}/usr/share/polkit-1/rules.d/*Net*	 ${CHROOT}/usr/share/polkit-1/rules.d
+# main rootfs does not install polkit, so create the destination dirs first;
+# also tolerate missing source files (glob may not match)
+mkdir -p ${CHROOT}/usr/share/polkit-1/actions ${CHROOT}/usr/share/polkit-1/rules.d
+cp ${BASE}/usr/share/polkit-1/actions/*Net* ${CHROOT}/usr/share/polkit-1/actions/ 2>/dev/null || true
+cp ${BASE}/usr/share/polkit-1/rules.d/*Net*  ${CHROOT}/usr/share/polkit-1/rules.d/ 2>/dev/null || true
 
 mkdir -p ${BASE}/new/etc/conf.d
 mkdir -p ${BASE}/new/etc/init.d
