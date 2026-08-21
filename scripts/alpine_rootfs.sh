@@ -133,17 +133,99 @@ chroot ${CHROOT} ash -l -c "ssh-keygen -A"
 echo 'qcom_wcnss_pil' > ${CHROOT}/etc/modules-load.d/wcnss.conf
 echo 'qcom_wcnss_pil' >> ${CHROOT}/etc/modules
 
-# CPU frequency: ondemand governor
+# ----------------------------------------------------------------------------
+# CPU frequency + scheduler tuning
+# ----------------------------------------------------------------------------
+# Load the ondemand governor module (schedutil, if built into the kernel, needs
+# no module). At runtime we prefer schedutil and fall back to ondemand.
 echo 'cpufreq_ondemand' > ${CHROOT}/etc/modules-load.d/cpufreq.conf
 echo 'cpufreq_ondemand' >> ${CHROOT}/etc/modules
 cat << 'EOF' > ${CHROOT}/etc/local.d/cpufreq.start
 #!/bin/sh
-echo ondemand > /sys/devices/system/cpu/cpufreq/policy0/scaling_governor
-echo 75 > /sys/devices/system/cpu/cpufreq/ondemand/up_threshold
-echo 20000 > /sys/devices/system/cpu/cpufreq/ondemand/sampling_rate
-echo 4 > /sys/devices/system/cpu/cpufreq/ondemand/sampling_down_factor
+# Pick the best available CPUFreq governor: schedutil first, then ondemand.
+GOV=ondemand
+AVAIL=/sys/devices/system/cpu/cpufreq/policy0/scaling_available_governors
+if [ -e "$AVAIL" ] && grep -qw schedutil "$AVAIL" 2>/dev/null; then
+    GOV=schedutil
+fi
+for p in /sys/devices/system/cpu/cpufreq/policy[0-9]*; do
+    echo "$GOV" > "$p/scaling_governor" 2>/dev/null
+done
+# ondemand tuning (silently ignored when using schedutil)
+echo 60    > /sys/devices/system/cpu/cpufreq/ondemand/up_threshold         2>/dev/null
+echo 20000 > /sys/devices/system/cpu/cpufreq/ondemand/sampling_rate         2>/dev/null
+echo 4     > /sys/devices/system/cpu/cpufreq/ondemand/sampling_down_factor  2>/dev/null
 EOF
 chmod +x ${CHROOT}/etc/local.d/cpufreq.start
+
+# ----------------------------------------------------------------------------
+# I/O scheduler tuning (eMMC/SD storage on the stick)
+# ----------------------------------------------------------------------------
+cat << 'EOF' > ${CHROOT}/etc/local.d/iosched.start
+#!/bin/sh
+for d in /sys/block/mmcblk*/queue/scheduler /sys/block/sd*/queue/scheduler; do
+    [ -e "$d" ] || continue
+    grep -q '\[mq-deadline\]' "$d" 2>/dev/null || echo mq-deadline > "$d" 2>/dev/null
+done
+EOF
+chmod +x ${CHROOT}/etc/local.d/iosched.start
+
+# ----------------------------------------------------------------------------
+# Memory tuning: zram compressed swap (avoids OOM on low-RAM sticks)
+# ----------------------------------------------------------------------------
+echo 'zram' > ${CHROOT}/etc/modules-load.d/zram.conf
+cat << 'EOF' > ${CHROOT}/etc/local.d/zram-swap.start
+#!/bin/sh
+modprobe zram 2>/dev/null || true
+# built-in zram may need an explicit hot-add to get a device node
+[ -b /dev/zram0 ] || echo 1 > /sys/class/zram-control/hot_add 2>/dev/null || true
+ZRAM=/dev/zram0
+[ -b "$ZRAM" ] || exit 0
+# pick a compression algorithm the kernel actually supports
+for algo in lzo-rle lzo lz4 zstd; do
+    echo "$algo" > /sys/block/zram0/comp_algorithm 2>/dev/null && break
+done
+# ~50% of physical RAM as compressed swap (safe upper bound on small devices)
+MEM_KB=$(awk '/^MemTotal:/ {print $2}' /proc/meminfo)
+echo $(( MEM_KB / 2 ))K > /sys/block/zram0/disksize
+mkswap "$ZRAM"
+swapon -p 100 "$ZRAM"
+EOF
+chmod +x ${CHROOT}/etc/local.d/zram-swap.start
+
+# ----------------------------------------------------------------------------
+# Network + VM sysctl tuning (router/hotspot role: USB-NCM + WiFi bridge)
+# ----------------------------------------------------------------------------
+# tcp_bbr + nf_conntrack are loaded at the 'modules' boot stage (before sysctl),
+# so the sysctl keys below resolve cleanly.
+echo 'tcp_bbr'       > ${CHROOT}/etc/modules-load.d/net-tune.conf
+echo 'nf_conntrack' >> ${CHROOT}/etc/modules-load.d/net-tune.conf
+mkdir -p ${CHROOT}/etc/sysctl.d
+cat << 'EOF' > ${CHROOT}/etc/sysctl.d/99-tune.conf
+# ---- network stack ----
+net.ipv4.ip_forward = 1
+net.ipv4.tcp_window_scaling = 1
+net.ipv4.tcp_timestamps = 1
+net.ipv4.tcp_sack = 1
+net.ipv4.tcp_fastopen = 3
+net.ipv4.tcp_tw_reuse = 1
+net.ipv4.tcp_max_syn_backlog = 8192
+net.core.somaxconn = 1024
+net.core.netdev_max_backlog = 4096
+net.core.rmem_max = 16777216
+net.core.wmem_max = 16777216
+net.ipv4.tcp_rmem = 4096 87380 16777216
+net.ipv4.tcp_wmem = 4096 65536 16777216
+net.ipv4.tcp_congestion_control = bbr
+net.netfilter.nf_conntrack_max = 131072
+# ---- virtual memory (pairs with zram swap) ----
+vm.swappiness = 80
+vm.vfs_cache_pressure = 50
+vm.dirty_ratio = 10
+vm.dirty_background_ratio = 5
+# ---- task scheduler ----
+kernel.sched_autogroup_enabled = 1
+EOF
 
 # First-boot rootfs resize (uses the actual root device from /proc/mounts)
 cat << 'EOF' > ${CHROOT}/etc/local.d/resize-rootfs.start
