@@ -134,6 +134,18 @@ echo 'qcom_wcnss_pil' > ${CHROOT}/etc/modules-load.d/wcnss.conf
 echo 'qcom_wcnss_pil' >> ${CHROOT}/etc/modules
 
 # ----------------------------------------------------------------------------
+# Disable cellular modem (MSS) + GPS
+# ----------------------------------------------------------------------------
+# The running device tree lives inside the stock boot.img (which we never rebuild),
+# and this repo ships no .dts source, so the modem/GPS dtb nodes cannot be deleted.
+# Functional equivalent: blacklist the Modem SubSystem driver. GPS is hosted on the
+# modem subsystem, so this also removes GPS. WiFi (qcom_wcnss_pil / wcn36xx) is
+# deliberately kept for the hotspot.
+echo 'blacklist qcom_q6v5_mss' > ${CHROOT}/etc/modprobe.d/blacklist-modem-gps.conf
+# rmtfs only serves the modem's shared memory; drop it when there is no modem
+chroot ${CHROOT} ash -l -c "rc-update del rmtfs default" 2>/dev/null || true
+
+# ----------------------------------------------------------------------------
 # CPU frequency + scheduler tuning
 # ----------------------------------------------------------------------------
 # Load the ondemand governor module (schedutil, if built into the kernel, needs
