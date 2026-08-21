@@ -61,7 +61,9 @@ apk add \
     iw \
     wpa_supplicant \
     e2fsprogs-extra \
-    openssh-server
+    openssh-server \
+    iproute2 \
+    dnsmasq
 
 # clear
 rm /etc/fstab
@@ -285,7 +287,7 @@ ACTION=="add", SUBSYSTEM=="udc", RUN+="/sbin/modprobe libcomposite", RUN+="/usr/
 EOF
 
 cat << EOF > ${CHROOT}/etc/udev/rules.d/99-nm-usb0.rules
-SUBSYSTEM=="net", ACTION=="add|change|move", ENV{DEVTYPE}=="gadget", ENV{NM_UNMANAGED}="0"
+SUBSYSTEM=="net", ACTION=="add|change|move", ENV{DEVTYPE}=="gadget", ENV{NM_UNMANAGED}="1"
 EOF
 
 # enable autologin on console
@@ -306,6 +308,14 @@ cp configs/usb.nmconnection ${CHROOT}/usr/local/etc/NetworkManager/system-connec
 chmod 0600 ${CHROOT}/usr/local/etc/NetworkManager/system-connections/*
 ln -s ../usr/local/etc/NetworkManager ${CHROOT}/etc/NetworkManager
 
+# usb0 is brought up standalone by local.d/usb-gadget.start (see below); tell NM
+# to leave it unmanaged so the two don't fight over the interface / DHCP server.
+mkdir -p ${CHROOT}/usr/local/etc/NetworkManager/conf.d
+cat << EOF > ${CHROOT}/usr/local/etc/NetworkManager/conf.d/99-unmanage-usb0.conf
+[main]
+unmanaged-devices=interface-name:usb0
+EOF
+
 mkdir -p ${CHROOT}/boot/extlinux
 cp configs/extlinux.conf ${CHROOT}/boot/extlinux
 
@@ -320,13 +330,35 @@ echo "/dev/mmcblk0p14\t/boot\text2\tdefaults\t0 2" >> ${CHROOT}/etc/fstab
 cp -a configs/templates ${CHROOT}/etc/gt
 cp scripts/setup_ncm_gadget.sh ${CHROOT}/usr/local/bin
 
-# Idempotent boot-time fallback to create the USB NCM gadget. The udev 'udc'
-# rule is the primary trigger, but if that event is missed or fires before
-# configfs is mounted, this makes sure usb0 still comes up. setup_ncm_gadget.sh
-# exits early if the gadget already exists, so running both is safe.
+# Standalone USB NCM bring-up. This does NOT rely on NetworkManager (which runs
+# chrooted and was unreliable at assigning the connected PC an IP). NM is told to
+# leave usb0 unmanaged. setup_ncm_gadget.sh bails out early if the gadget already
+# exists, so running it from both the udev rule and here is safe.
 cat << 'EOF' > ${CHROOT}/etc/local.d/usb-gadget.start
 #!/bin/sh
-/usr/local/bin/setup_ncm_gadget.sh
+/usr/local/bin/setup_ncm_gadget.sh || true
+
+IF=usb0
+# wait a moment for the gadget interface to appear
+for i in 1 2 3 4 5 6 7 8; do
+    [ -e /sys/class/net/$IF ] && break
+    sleep 1
+done
+[ -e /sys/class/net/$IF ] || exit 0
+
+ip link set $IF up
+ip addr add 192.168.5.1/24 dev $IF 2>/dev/null
+
+# DHCP + DNS for the connected PC. Bound to usb0 only, so it never clashes with
+# NM's hotspot dnsmasq on wlan0.
+PID=/run/dnsmasq-usb0.pid
+if [ ! -f "$PID" ] || ! kill -0 "$(cat "$PID" 2>/dev/null)" 2>/dev/null; then
+    /usr/sbin/dnsmasq --interface=$IF --bind-interfaces \
+        --pid-file=$PID \
+        --dhcp-range=192.168.5.2,192.168.5.254,255.255.255.0,1h \
+        --dhcp-option=option:router,192.168.5.1 \
+        --dhcp-option=option:dns-server,223.5.5.5,119.119.119.119
+fi
 EOF
 chmod +x ${CHROOT}/etc/local.d/usb-gadget.start
 
