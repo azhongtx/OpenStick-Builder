@@ -163,9 +163,14 @@ chmod +x ${CHROOT}/etc/local.d/cpufreq.start
 # ----------------------------------------------------------------------------
 cat << 'EOF' > ${CHROOT}/etc/local.d/iosched.start
 #!/bin/sh
-for d in /sys/block/mmcblk*/queue/scheduler /sys/block/sd*/queue/scheduler; do
-    [ -e "$d" ] || continue
-    grep -q '\[mq-deadline\]' "$d" 2>/dev/null || echo mq-deadline > "$d" 2>/dev/null
+for d in /sys/block/mmcblk*/queue /sys/block/sd*/queue; do
+    [ -d "$d" ] || continue
+    # mq-deadline: low, predictable latency for mixed read/write loads
+    grep -q '\[mq-deadline\]' "$d/scheduler" 2>/dev/null || \
+        echo mq-deadline > "$d/scheduler" 2>/dev/null
+    # larger read-ahead + queue depth for SD/eMMC throughput
+    echo 2048 > "$d/read_ahead_kb" 2>/dev/null
+    echo 128  > "$d/nr_requests"   2>/dev/null
 done
 EOF
 chmod +x ${CHROOT}/etc/local.d/iosched.start
@@ -200,6 +205,7 @@ chmod +x ${CHROOT}/etc/local.d/zram-swap.start
 # so the sysctl keys below resolve cleanly.
 echo 'tcp_bbr'       > ${CHROOT}/etc/modules-load.d/net-tune.conf
 echo 'nf_conntrack' >> ${CHROOT}/etc/modules-load.d/net-tune.conf
+echo 'fq_codel'     >> ${CHROOT}/etc/modules-load.d/net-tune.conf
 mkdir -p ${CHROOT}/etc/sysctl.d
 cat << 'EOF' > ${CHROOT}/etc/sysctl.d/99-tune.conf
 # ---- network stack ----
@@ -218,13 +224,35 @@ net.ipv4.tcp_rmem = 4096 87380 16777216
 net.ipv4.tcp_wmem = 4096 65536 16777216
 net.ipv4.tcp_congestion_control = bbr
 net.netfilter.nf_conntrack_max = 131072
+net.netfilter.nf_conntrack_tcp_timeout_established = 7200
+net.ipv4.tcp_mtu_probing = 1
+net.ipv4.tcp_no_metrics_save = 1
+net.core.default_qdisc = fq_codel
 # ---- virtual memory (pairs with zram swap) ----
 vm.swappiness = 80
 vm.vfs_cache_pressure = 50
 vm.dirty_ratio = 10
 vm.dirty_background_ratio = 5
+vm.min_free_kbytes = 8192
+fs.file-max = 65536
 # ---- task scheduler ----
 kernel.sched_autogroup_enabled = 1
+# ---- security ----
+net.ipv4.conf.all.rp_filter = 1
+net.ipv4.icmp_echo_ignore_broadcasts = 1
+EOF
+
+# ----------------------------------------------------------------------------
+# Boot speed + flash-wear tuning
+# ----------------------------------------------------------------------------
+# run independent boot services in parallel
+sed -i 's/^#\?rc_parallel=.*/rc_parallel="YES"/' ${CHROOT}/etc/rc.conf
+grep -q '^rc_parallel=' ${CHROOT}/etc/rc.conf || echo 'rc_parallel="YES"' >> ${CHROOT}/etc/rc.conf
+# remount root with noatime + batched commit; tmpfs for /tmp and /var/log to cut SD writes
+cat << EOF >> ${CHROOT}/etc/fstab
+PARTUUID=a7ab80e8-e9d1-e8cd-f157-93f69b1d141e / ext4 noatime,commit=60 0 0
+tmpfs /tmp tmpfs nodev,nosuid,noexec,size=32M 0 0
+tmpfs /var/log tmpfs nodev,nosuid,size=16M 0 0
 EOF
 
 # First-boot rootfs resize (uses the actual root device from /proc/mounts)
