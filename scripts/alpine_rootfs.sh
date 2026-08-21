@@ -6,6 +6,9 @@ export RELEASE=${RELEASE=v3.24}
 export PMOS_RELEASE=${PMOS_RELEASE=v25.12}
 export MIRROR=${MIRROR=http://dl-cdn.alpinelinux.org/alpine}
 export PMOS_MIRROR=${PMOS_MIRROR=http://mirror.postmarketos.org/postmarketos}
+# China mirror used for the *built device's* runtime apk (faster on the stick in CN).
+# Build-time apk still uses the official MIRROR above (fast in CI).
+export CHINA_MIRROR=${CHINA_MIRROR=https://mirrors.tuna.tsinghua.edu.cn/alpine}
 export APK_STATIC_URL=https://gitlab.alpinelinux.org/api/v4/projects/5/packages/generic/v3.0.6/x86_64/apk.static
 # Pre-extracted kernel modules + firmware + low-level firmware from the device flash package
 export PREBUILT=${PREBUILT=prebuilt/ufi103s}
@@ -16,8 +19,8 @@ rm -rf ${CHROOT}
 
 mkdir -p ${CHROOT}/etc/apk
 cat << EOF >  ${CHROOT}/etc/apk/repositories
-${MIRROR}/${RELEASE}/main
-${MIRROR}/${RELEASE}/community
+${CHINA_MIRROR}/${RELEASE}/main
+${CHINA_MIRROR}/${RELEASE}/community
 @pmos ${PMOS_MIRROR}/${PMOS_RELEASE}
 EOF
 
@@ -167,6 +170,10 @@ echo 'ttyMSM0::respawn:/bin/sh' >> ${CHROOT}/etc/inittab
 
 echo ${HOST_NAME} > ${CHROOT}/etc/hostname
 sed -i "/localhost/ s/$/ ${HOST_NAME}/" ${CHROOT}/etc/hosts
+
+# timezone: Asia/Shanghai
+ln -sf /usr/share/zoneinfo/Asia/Shanghai ${CHROOT}/etc/localtime
+echo 'Asia/Shanghai' > ${CHROOT}/etc/TZ
 
 # setup NetworkManager (hotspot + usb only; no modem/wwan connection)
 mkdir -p ${CHROOT}/usr/local/etc/NetworkManager/system-connections
