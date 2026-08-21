@@ -3,6 +3,10 @@
 CONFIGFS="/sys/kernel/config/usb_gadget"
 NAME="openstick"
 
+# configfs must be mounted before the gadget tree exists. Mount it if missing
+# (Alpine/OpenRC does not mount configfs by default).
+[ -d /sys/kernel/config ] || mount -t configfs none /sys/kernel/config 2>/dev/null || true
+
 DIR="${CONFIGFS}/${NAME}"
 
 NCM_HOST_ADDR="2a:85:da:41:eb:f9"

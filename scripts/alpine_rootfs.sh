@@ -265,6 +265,8 @@ cat << EOF >> ${CHROOT}/etc/fstab
 PARTUUID=a7ab80e8-e9d1-e8cd-f157-93f69b1d141e / ext4 noatime,commit=60 0 0
 tmpfs /tmp tmpfs nodev,nosuid,noexec,size=32M 0 0
 tmpfs /var/log tmpfs nodev,nosuid,size=16M 0 0
+# USB NCM gadget needs configfs mounted before the gadget script runs
+configfs /sys/kernel/config configfs defaults 0 0
 EOF
 
 # First-boot rootfs resize (uses the actual root device from /proc/mounts)
@@ -317,6 +319,16 @@ echo "/dev/mmcblk0p14\t/boot\text2\tdefaults\t0 2" >> ${CHROOT}/etc/fstab
 # copy gadget-tool templates and script
 cp -a configs/templates ${CHROOT}/etc/gt
 cp scripts/setup_ncm_gadget.sh ${CHROOT}/usr/local/bin
+
+# Idempotent boot-time fallback to create the USB NCM gadget. The udev 'udc'
+# rule is the primary trigger, but if that event is missed or fires before
+# configfs is mounted, this makes sure usb0 still comes up. setup_ncm_gadget.sh
+# exits early if the gadget already exists, so running both is safe.
+cat << 'EOF' > ${CHROOT}/etc/local.d/usb-gadget.start
+#!/bin/sh
+/usr/local/bin/setup_ncm_gadget.sh
+EOF
+chmod +x ${CHROOT}/etc/local.d/usb-gadget.start
 
 # backup rootfs
 rm -f alpine_rootfs.tgz
